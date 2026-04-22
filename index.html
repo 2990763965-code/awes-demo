@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>AWES 强化学习 3D 训练监控舱</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <style>
+        :root {
+            --bg-color: #0b1120;
+            --panel-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg-color); color: var(--text-main); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; overflow-x: hidden; }
+        .header { text-align: center; margin-bottom: 20px; width: 100%; }
+        .header h1 { margin: 0; font-size: 26px; letter-spacing: 2px; color: var(--accent); }
+        .header p { margin: 5px 0; color: var(--text-muted); font-size: 14px;}
+        
+        .dashboard { width: 100%; max-width: 1200px; display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+        .panel { background-color: var(--panel-bg); border-radius: 12px; padding: 20px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5); border: 1px solid #334155; box-sizing: border-box; }
+        
+        .controls-wrapper { flex: 1; min-width: 300px; max-width: 350px; }
+        .controls label { display: block; margin-top: 15px; font-size: 14px; font-weight: bold; color: var(--text-muted); }
+        .controls input[type="range"] { width: 100%; margin-top: 8px; cursor: pointer; }
+        .val-display { float: right; color: var(--accent); }
+        
+        button { width: 100%; margin-top: 30px; padding: 12px; background-color: var(--accent); color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button:hover { background-color: #2563eb; }
+        button:disabled { background-color: #475569; cursor: not-allowed; }
+
+        .metrics { margin-top: 30px; border-top: 1px solid #334155; padding-top: 20px; }
+        .metric-box { margin-bottom: 15px; }
+        .metric-title { font-size: 12px; color: var(--text-muted); }
+        .metric-value { font-size: 20px; font-weight: bold; margin-top: 5px; } /* 缩小了一点字体以适应长报错 */
+
+        .visuals-wrapper { flex: 2; min-width: 500px; display: flex; flex-direction: column; gap: 20px; }
+        .chart-container { position: relative; height: 220px; width: 100%; background: #0b1120; border-radius: 8px; border: 1px solid #334155; padding: 10px; box-sizing: border-box;}
+        
+        .three-container { position: relative; height: 350px; width: 100%; background: #000; border-radius: 8px; border: 1px solid #334155; overflow: hidden; }
+        #threejs-canvas { width: 100%; height: 100%; }
+        
+        .status-badge { position: absolute; top: 15px; right: 15px; padding: 6px 12px; border-radius: 4px; font-size: 13px; font-weight: bold; display: none; z-index: 10; background: rgba(0,0,0,0.7); border: 1px solid; }
+        .hint { position: absolute; bottom: 10px; left: 10px; font-size: 12px; color: rgba(255,255,255,0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>AWES 强化学习训练监控舱 (3D空间版)</h1>
+        <p>基于 DDPG 算法的高空风能系统姿态优化与 8 字形轨迹控制</p>
+    </div>
+
+    <div class="dashboard">
+        <div class="panel controls-wrapper">
+            <div class="controls">
+                <label>学习率 (Learning Rate) <span class="val-display" id="lrVal">0.001</span>
+                    <input type="range" id="lrSlider" min="0.0001" max="0.01" step="0.0001" value="0.001">
+                </label>
+                <label>折扣因子 (Gamma) <span class="val-display" id="gammaVal">0.95</span>
+                    <input type="range" id="gammaSlider" min="0.80" max="0.99" step="0.01" value="0.95">
+                </label>
+                <label>目标飞行高度 (m) <span class="val-display" id="heightVal">50</span>
+                    <input type="range" id="heightSlider" min="40" max="100" step="1" value="50">
+                </label>
+                <button id="startBtn">▶ 开始云端模拟训练</button>
+            </div>
+
+            <div class="metrics">
+                <div class="metric-box">
+                    <div class="metric-title">当前训练轮数 (Episode)</div>
+                    <div class="metric-value" id="epDisplay" style="font-size: 24px;">0 / 500</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-title">最终平均 Reward</div>
+                    <div class="metric-value" id="rewardDisplay" style="font-size: 24px;">--</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-title">策略状态 (Policy)</div>
+                    <div class="metric-value" id="statusDisplay">待机中...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="visuals-wrapper">
+            <div class="panel" style="padding-bottom: 0;">
+                <h3 style="margin: 0 0 10px 0; color: var(--text-muted); font-size: 14px;">奖励函数收敛曲线 (Reward Curve)</h3>
+                <div class="chart-container">
+                    <canvas id="rewardChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3 style="margin: 0 0 10px 0; color: var(--text-muted); font-size: 14px;">实机姿态验证 (三维侧风飞行轨迹验证)</h3>
+                <div class="three-container">
+                    <div id="trajStatus" class="status-badge"></div>
+                    <div class="hint">💡 提示：按住鼠标左键可旋转 3D 视角，滚轮缩放</div>
+                    <div id="threejs-canvas"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.onload = function() {
+            // === 1. 初始化 2D 图表 ===
+            const ctxChart = document.getElementById('rewardChart').getContext('2d');
+            let rewardChart = new Chart(ctxChart, {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: 'Total Reward', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 2, pointRadius: 0, fill: true }] },
+                options: { responsive: true, maintainAspectRatio: false, animation: false,
+                    scales: { x: { display: true, grid: { color: '#1e293b' } }, y: { display: true, grid: { color: '#1e293b' }, suggestedMin: -200, suggestedMax: 100 } },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // === 2. 初始化 3D 引擎 ===
+            const container3D = document.getElementById('threejs-canvas');
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.Fog(0x000000, 100, 300); 
+            
+            const camera = new THREE.PerspectiveCamera(45, container3D.clientWidth / container3D.clientHeight, 0.1, 1000);
+            camera.position.set(100, 50, 120);
+
+            const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(container3D.clientWidth, container3D.clientHeight);
+            container3D.appendChild(renderer.domElement);
+
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            const gridHelper = new THREE.GridHelper(200, 20, 0x334155, 0x1e293b);
+            scene.add(gridHelper);
+            
+            const baseGeo = new THREE.CylinderGeometry(2, 2, 5, 16);
+            const baseMat = new THREE.MeshBasicMaterial({ color: 0x94a3b8 });
+            const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+            scene.add(baseMesh);
+
+            const kiteGeo = new THREE.ConeGeometry(3, 8, 4);
+            kiteGeo.rotateX(Math.PI / 2); 
+            const kiteMat = new THREE.MeshBasicMaterial({ color: 0xef4444, wireframe: true });
+            const kiteMesh = new THREE.Mesh(kiteGeo, kiteMat);
+            scene.add(kiteMesh);
+
+            const tetherMat = new THREE.LineBasicMaterial({ color: 0xf8fafc, transparent: true, opacity: 0.5 });
+            const tetherGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,50,0)]);
+            const tetherLine = new THREE.Line(tetherGeo, tetherMat);
+            scene.add(tetherLine);
+
+            const maxTrailPoints = 150;
+            const trailGeo = new THREE.BufferGeometry();
+            const trailPositions = new Float32Array(maxTrailPoints * 3);
+            trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+            let trailMat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2 });
+            const trailLine = new THREE.Line(trailGeo, trailMat);
+            scene.add(trailLine);
+            let trailPointsArr = [];
+
+            let simState = 'idle'; 
+            let t = 0; 
+            let R = 80; 
+
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+
+                if (simState === 'converged' || simState === 'diverged' || simState === 'oscillating') {
+                    let targetX, targetY, targetZ;
+                    
+                    if (simState === 'converged') {
+                        const azimuth = 0.5 * Math.sin(t); 
+                        const elevation = (Math.PI / 6) + 0.15 * Math.sin(2 * t); 
+                        targetX = R * Math.cos(elevation) * Math.sin(azimuth);
+                        targetY = R * Math.sin(elevation);
+                        targetZ = R * Math.cos(elevation) * Math.cos(azimuth);
+                    } else if (simState === 'diverged') {
+                        targetX = kiteMesh.position.x + (Math.random() - 0.5) * 5;
+                        targetY = kiteMesh.position.y - 0.5; 
+                        targetZ = kiteMesh.position.z + (Math.random() - 0.5) * 5;
+                        if(targetY < 0) targetY = 0;
+                    } else if (simState === 'oscillating') {
+                        targetX = 40 * Math.sin(t*3) + (Math.random()-0.5)*10;
+                        targetY = 40 + 20 * Math.cos(t*2) + (Math.random()-0.5)*10;
+                        targetZ = 40 * Math.cos(t*1.5);
+                    }
+
+                    const currentPos = kiteMesh.position.clone();
+                    const nextPos = new THREE.Vector3(targetX, targetY, targetZ);
+                    kiteMesh.position.lerp(nextPos, 0.1); 
+                    
+                    if (currentPos.distanceTo(nextPos) > 0.01) {
+                        kiteMesh.lookAt(nextPos.clone().add(nextPos.clone().sub(currentPos).multiplyScalar(10)));
+                    }
+
+                    tetherLine.geometry.setFromPoints([new THREE.Vector3(0,0,0), kiteMesh.position]);
+
+                    if(kiteMesh.position.y > 0.1) {
+                        trailPointsArr.push(kiteMesh.position.clone());
+                        if (trailPointsArr.length > maxTrailPoints) trailPointsArr.shift();
+                        for (let i = 0; i < trailPointsArr.length; i++) {
+                            trailPositions[i*3] = trailPointsArr[i].x;
+                            trailPositions[i*3+1] = trailPointsArr[i].y;
+                            trailPositions[i*3+2] = trailPointsArr[i].z;
+                        }
+                        for (let i = trailPointsArr.length; i < maxTrailPoints; i++) {
+                            trailPositions[i*3] = trailPointsArr[trailPointsArr.length-1].x;
+                            trailPositions[i*3+1] = trailPointsArr[trailPointsArr.length-1].y;
+                            trailPositions[i*3+2] = trailPointsArr[trailPointsArr.length-1].z;
+                        }
+                        trailGeo.attributes.position.needsUpdate = true;
+                    }
+                    t += 0.03; 
+                }
+                renderer.render(scene, camera);
+            }
+            animate();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = container3D.clientWidth / container3D.clientHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(container3D.clientWidth, container3D.clientHeight);
+            });
+
+            // === 3. UI 交互与 RL 训练逻辑 (增强版) ===
+            const lrSlider = document.getElementById('lrSlider');
+            const gammaSlider = document.getElementById('gammaSlider');
+            const heightSlider = document.getElementById('heightSlider');
+            const btn = document.getElementById('startBtn');
+            const badge = document.getElementById('trajStatus');
+            
+            lrSlider.oninput = () => document.getElementById('lrVal').innerText = lrSlider.value;
+            gammaSlider.oninput = () => document.getElementById('gammaVal').innerText = gammaSlider.value;
+            heightSlider.oninput = () => document.getElementById('heightVal').innerText = heightSlider.value;
+
+            btn.onclick = () => {
+                btn.disabled = true;
+                btn.innerText = "正在训练中...";
+                simState = 'idle';
+                trailPointsArr = [];
+                badge.style.display = 'none';
+                kiteMesh.position.set(0, 80, 0); 
+
+                const lr = parseFloat(lrSlider.value);
+                const gamma = parseFloat(gammaSlider.value);
+
+                // --- 核心故障逻辑判定 ---
+                let isDiverging = false;
+                let isOscillating = false;
+                let errorMsg = "";
+
+                if (lr > 0.005) {
+                    isDiverging = true;
+                    errorMsg = "学习率过大，梯度爆炸";
+                } else if (gamma < 0.90) {
+                    isDiverging = true;
+                    errorMsg = "Gamma过小，策略极其短视";
+                } else if (gamma > 0.98) {
+                    isDiverging = true;
+                    errorMsg = "Gamma过大，Q值方差发散";
+                } else if (lr > 0.002 && lr <= 0.005) {
+                    isOscillating = true;
+                    errorMsg = "学习率偏大，持续震荡";
+                }
+
+                rewardChart.data.labels = [];
+                rewardChart.data.datasets[0].data = [];
+                let currentEp = 0;
+                let currentScore = -200;
+
+                const trainingInterval = setInterval(() => {
+                    for(let i=0; i<5; i++) {
+                        currentEp++;
+                        if(currentEp > 500) break;
+                        
+                        if (isDiverging) { 
+                            currentScore = -100 + (Math.random() - 0.5) * 300; 
+                        } else if (isOscillating) { 
+                            currentScore += (20 - currentScore) * 0.05 + (Math.random() - 0.5) * 80; 
+                        } else { 
+                            currentScore += (85 - currentScore) * 0.02 + (Math.random() - 0.5) * 15; 
+                        }
+
+                        rewardChart.data.labels.push(currentEp);
+                        rewardChart.data.datasets[0].data.push(currentScore);
+                    }
+                    rewardChart.update();
+                    document.getElementById('epDisplay').innerText = `${currentEp} / 500`;
+
+                    if (currentEp >= 500) {
+                        clearInterval(trainingInterval);
+                        btn.disabled = false;
+                        btn.innerText = "▶ 重新验证参数";
+                        
+                        document.getElementById('rewardDisplay').innerText = currentScore.toFixed(1);
+                        
+                        let policyStatus = "优秀 (完美收敛)";
+                        let statusColor = "var(--success)";
+                        let hexColor = 0x10b981; 
+
+                        if(isDiverging) { 
+                            policyStatus = `发散坠毁 (${errorMsg})`; 
+                            statusColor = "var(--danger)"; 
+                            hexColor = 0xef4444; 
+                        } else if(isOscillating) { 
+                            policyStatus = `不稳 (${errorMsg})`; 
+                            statusColor = "var(--warning)"; 
+                            hexColor = 0xf59e0b; 
+                        }
+                        
+                        const statusEl = document.getElementById('statusDisplay');
+                        statusEl.innerText = policyStatus;
+                        statusEl.style.color = statusColor;
+
+                        badge.style.display = 'block';
+                        badge.style.borderColor = statusColor;
+                        badge.style.color = statusColor;
+                        badge.innerText = `实机状态: ${policyStatus}`;
+                        
+                        trailMat.color.setHex(hexColor);
+                        simState = isDiverging ? 'diverged' : (isOscillating ? 'oscillating' : 'converged');
+                        t = 0; 
+                    }
+                }, 20);
+            };
+        };
+    </script>
+</body>
+</html>
